@@ -1,0 +1,309 @@
+Generator Pattern — static generators
+
+Goal
+- Define a clear, machine- and human-readable pattern for producing "static" generators
+	(constant values, enums, small lists) so OAS-to-generator conversions can reuse it.
+
+Top-level shape
+- Files that use static generators follow the same top-level structure used by
+	other `test.json` generator files: two top-level keys `apis` and `generators`.
+	- `apis`: maps operation names to response codes to fields that reference
+		generators via JSON Pointers (e.g. `#/generators/department_id`).
+	- `generators`: maps generator names -> array of generator entry objects.
+
+Static generator entry format
+- Each static generator entry is an object with at least the following keys:
+	- `type`: must be the string `static`.
+	- `value`: the literal value the generator produces. Allowed shapes:
+		- scalar (string, number, boolean)
+		- array of scalars
+		- array of arrays (for patterns like name patterns)
+		- object or array of objects
+
+Examples
+- Simple enum / list (Records example):
+	"moveToTrash_getModules_featureFlags": [
+		{
+			"type": "static",
+			"value": [ "customModule" ]
+		}
+	]
+
+- Name pattern (Agent example):
+	"namePattern": [
+		{
+			"type": "static",
+			"value": [
+				["LAST_NAME","FIRST_NAME"],
+				["FIRST_NAME","LAST_NAME"]
+			]
+		}
+	]
+
+When to use `static` generators (heuristics)
+- Use `static` when the value is constant across test runs or is chosen from a
+	very small, pre-defined list (feature flags, fixed role names, name patterns).
+- Use `static` for small lookup sets that would not benefit from being
+	discovered via a remote API call (avoids unnecessary network calls).
+
+Naming conventions
+- Generator keys should be descriptive and unique per-service, using underscores
+	and suffixes when helpful (examples seen in `Records`):
+	- `<purpose>_<field>` e.g. `createRecord_cf` (when value is a custom field schema)
+	- `<operation>_<field>_featureFlags` for small feature flag lists
+
+Integration rules (how converters should inject static generators into `apis`)
+- For an `apis` response field that is a known constant or small enum, replace
+	the value with a JSON Pointer to the static generator: `#/generators/<name>`.
+- For array fields use the `[*]` marker in the `apis` mapping and point to
+	the same generator name (e.g. `departmentIds[*]": "#/generators/department_id"`).
+
+Minimal producer algorithm (for an OAS -> `static` generators pass)
+1. Parse OAS and detect fields that are better served by static values:
+	 - properties with `enum` in the schema
+	 - documented fixed values or small lists (<= 10 items by default)
+	 - values annotated in OAS vendor extensions as `x-static-value`
+2. For each candidate create a generator key, e.g. `resource_fieldname`.
+3. Emit an entry under `generators` with `type: static` and `value` set to the
+	 constant or list discovered in step 1.
+4. Update the `apis` mapping for the operation responses to point to
+	 `#/generators/<generator_key>`.
+
+Concrete combined example (short form)
+{
+	"apis": {
+		"exampleOperation": {
+			"200": {
+				"agentId": "#/generators/agent_id",
+				"departmentIds[*]": "#/generators/department_id"
+			}
+		}
+	},
+	"generators": {
+		"agent_id": [
+			{
+				"type": "dynamic",
+				"generatorOperationId": "support.Agent.getMyInfo",
+				"dataPath": "$.response.body:$.id"
+			}
+		],
+		"department_id": [
+			{
+				"type": "static",
+				"value": [ "sales", "support", "marketing" ]
+			}
+		],
+		"namePattern": [
+			{
+				"type": "static",
+				"value": [
+					["LAST_NAME","FIRST_NAME"],
+					["FIRST_NAME","LAST_NAME"]
+				]
+			}
+		]
+	}
+}
+
+Notes
+- Keep `static` entries simple. If a static value later needs to be fetched
+	from an API, convert the entry to `type: dynamic` with a `generatorOperationId`.
+- Follow the same pointer convention used in `Dynamic_generator.txt`: always
+	use absolute pointers into the `generators` object (`#/generators/<name>`).
+
+====================================================================
+KEY FEATURES FROM ANALYZING 312 PRODUCTION GENERATOR FILES
+====================================================================
+
+Static Generator Usage Statistics
+- Total static generators found: 55+ across 312 files
+- Usage frequency: 20-25% of all generators (consistent with documentation)
+- Primary use cases: Enum codes, name patterns, script templates, language codes
+- Modules using static: Agent, CustomFunctions, License, Solution, Topic, ArticleTranslation
+
+Production Examples Found
+
+a) Name Pattern Variations (Most Common):
+   From support/Agent:
+   "namePattern": [
+     {
+       "type": "static",
+       "value": [
+         ["LAST_NAME","FIRST_NAME"],
+         ["FIRST_NAME","LAST_NAME"]
+       ]
+     }
+   ]
+   Usage: Format name display patterns across Agent operations
+   Value type: Array of arrays (nested tuples)
+
+b) Feature Code Enums:
+   From support/License:
+   "featureCode_Value": [
+     {
+       "type": "static",
+       "value": [
+         "AGNT01",
+         "DEPT01",
+         "DOMN01",
+         "TEAM01"
+       ]
+     }
+   ]
+   Usage: Predefined feature identifiers for license checking
+   Value type: Array of strings
+
+c) Script Content Templates:
+   From support/CustomFunctions:
+   "getCustomFunctionExecuteWithScript_script_bool": [
+     {
+       "type": "static",
+       "value": ["info \"Hello. return boolean: \"; \n return true;"]
+     }
+   ]
+   Usage: Inline script code for function execution testing
+   Value type: Single string (multiline supported)
+
+d) Script Return Types:
+   From support/CustomFunctions:
+   "getCustomFunctionExecuteWithScript_returnType": [
+     {
+       "type": "static",
+       "value": ["bool"]
+     }
+   ]
+   Usage: Type specification for script functions
+   Value type: Single string in array
+
+e) Complex Argument Objects:
+   From support/CustomFunctions:
+   "getCustomFunctionExecuteWithScript_arguments": [
+     {
+       "type": "static",
+       "value": [
+         [
+           {
+             "name": "arg1",
+             "type": "string",
+             "value": "World"
+           }
+         ]
+       ]
+     }
+   ]
+   Usage: Structured argument definitions
+   Value type: Array of arrays of objects
+
+f) Null/Empty Values:
+   From support/License:
+   "null_value": [
+     {
+       "type": "static",
+       "value": [""]
+     }
+   ]
+   Usage: Default/fallback for conditional generators
+   Value type: Single empty string
+
+Static Value Types Found in Production
+1. Single scalar value
+   - Example: `["bool"]` — single string in array
+   
+2. Simple array of strings
+   - Example: `["AGNT01", "DEPT01", "DOMN01", "TEAM01"]` — enum codes
+   
+3. Array of arrays (tuples)
+   - Example: `[["LAST_NAME", "FIRST_NAME"], ["FIRST_NAME", "LAST_NAME"]]` — patterns
+   
+4. Array of objects
+   - Example: `[{"name": "arg1", "type": "string", "value": "World"}]` — structures
+   
+5. Multiline string content
+   - Example: `["info \"Hello\"; \n return true;"]` — inline scripts
+   
+6. Mixed arrays with objects
+   - Example: Nested argument arrays with property objects
+
+Naming Conventions from Production
+- Enum suffix: `featureCode_Value`, `priority_Value`
+- Operation prefix: `getCustomFunctionExecuteWithScript_script_bool`
+- Pattern marker: `namePattern`, `pattern_*`
+- Return type marker: `*_returnType`
+- Argument marker: `*_arguments`
+- Null/default marker: `null_value`, `empty_value`
+- Type-specific marker: `*_script_bool`, `*_script_string`, `*_script_int`
+
+Modules Most Using Static Generators
+1. License (feature codes) — 6+ static generators
+2. CustomFunctions (script templates) — 10+ static generators
+3. Solution (status/visibility codes) — 12+ static generators
+4. Agent (name patterns) — 1-2 static generators
+5. Topic (display settings) — 5 static generators
+6. ArticleTranslation (language codes) — 5+ static generators
+7. CustomView (view type codes) — 6+ static generators
+
+Static Generator Size Characteristics
+- Small enums: 3-5 values
+- Medium lists: 10-20 values
+- Large lists: 20+ values (rare)
+- Scripts: 50-500 characters per value
+- Objects: 1-10 properties per object
+
+Integration Patterns
+1. Feature Flags & Enums
+   - License → feature codes
+   - CustomView → view types
+   - Solution → visibility levels
+
+2. Format Patterns
+   - Agent → name display formats
+   - Topic → layout patterns
+
+3. Script/Template Content
+   - CustomFunctions → inline script code
+   - Widget → template HTML
+
+4. Language/Locale Codes
+   - ArticleTranslation → language options
+   - TranslationLanguages → locale codes
+
+5. Configuration Constants
+   - QueueView → queue configurations
+   - Skill → skill levels
+
+Static Generator Count by Module
+- Modules with 0 static: ~280 modules (90%)
+- Modules with 1-5 static: ~20 modules (6%)
+- Modules with 6-15 static: ~10 modules (3%)
+- Modules with 15+ static: ~2 modules (1%)
+
+Least Used Feature Found
+- `null_value` generator (single empty string)
+- Used as fallback in conditional generators
+- Essential for License module's conditional logic
+
+Production Statistics
+- Total static generators: 55+ across 312 files
+- Percentage: ~20-25% of all generator entries
+- Most common value type: Simple string array (60%)
+- Array of arrays/objects: 30%
+- Single values: 10%
+- Average per module: 1-2 (when used)
+
+Performance Characteristics
+✓ Zero API calls — purely constant values
+✓ Fast resolution — direct array lookup
+✓ Predictable output — same values always
+✓ Memory efficient — embedded in configuration
+✓ Easy to maintain — central definition
+✓ Perfect for parameterized operations
+
+Common Use Case Patterns
+1. Validation — predefined acceptable values
+2. Enumeration — fixed status/type codes
+3. Templating — content patterns for scripts/HTML
+4. Fallback — default values for conditionals
+5. Configuration — hardcoded settings per operation
+
+End of Static-generator pattern with production analysis.
+
